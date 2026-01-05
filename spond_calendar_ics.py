@@ -5,6 +5,8 @@ import os
 import asyncio
 import ftplib
 from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Dict, Any
+
 from spond import spond
 
 # ---------------------------------------------------------------------
@@ -26,14 +28,14 @@ ICS_FILENAME = "spond_events.ics"
 PAST_DAYS   = int(os.getenv("PAST_DAYS", "30"))     # include recent past
 FUTURE_DAYS = int(os.getenv("FUTURE_DAYS", "365"))  # include distant future
 
-# You said max ~600 in window; give ourselves headroom
+# You said max ~600 in window; give some headroom
 MAX_EVENTS = int(os.getenv("MAX_EVENTS", "1200"))
 
 
 # ---------------------------------------------------------------------
 # iCalendar helpers
 # ---------------------------------------------------------------------
-def format_dt_utc(dt: datetime) -> str:
+def format_dt_utc(dt):
     """Format a datetime as UTC for ICS, e.g. 20251127T090000Z"""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -42,7 +44,7 @@ def format_dt_utc(dt: datetime) -> str:
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
 
-def ical_escape(text: str) -> str:
+def ical_escape(text):
     """Escape text for iCalendar (basic escaping)."""
     if not text:
         return ""
@@ -53,7 +55,7 @@ def ical_escape(text: str) -> str:
     return text
 
 
-def fold_ical_line(line: str) -> str:
+def fold_ical_line(line):
     """Fold a single ICS line at 75 characters with continuation."""
     max_len = 75
     if len(line) <= max_len:
@@ -66,8 +68,8 @@ def fold_ical_line(line: str) -> str:
     return "\r\n".join(parts)
 
 
-def parse_iso(ts: str) -> datetime | None:
-    """Parse ISO timestamps that may end with 'Z'."""
+def parse_iso(ts):
+    """Parse ISO timestamps that may end with 'Z'. Returns aware datetime or None."""
     if not ts:
         return None
     try:
@@ -79,7 +81,7 @@ def parse_iso(ts: str) -> datetime | None:
 # ---------------------------------------------------------------------
 # Spond → events
 # ---------------------------------------------------------------------
-async def fetch_events() -> list[dict]:
+async def fetch_events():
     """
     Fetch Spond events for a bounded time window, requesting enough events
     (max ~600 expected) so we don't hit the library's default cap.
@@ -94,15 +96,23 @@ async def fetch_events() -> list[dict]:
 
         # Ask Spond for the window + enough items to cover it.
         # (If the library ignores min/max filters, we still do a local filter below.)
-        events = await s.get_events(
-            group_id=GROUP_ID,
-            include_scheduled=True,
-            max_events=MAX_EVENTS,
-            min_start=start_window,
-            max_start=end_window,
-        )
+        try:
+            events = await s.get_events(
+                group_id=GROUP_ID,
+                include_scheduled=True,
+                max_events=MAX_EVENTS,
+                min_start=start_window,
+                max_start=end_window,
+            )
+        except TypeError:
+            # Older versions of the library may not support min_start/max_start.
+            # Still request lots of events then filter locally.
+            events = await s.get_events(
+                group_id=GROUP_ID,
+                include_scheduled=True,
+                max_events=MAX_EVENTS,
+            )
 
-        # Local filter + parsing (belt-and-braces)
         filtered = []
         for e in events:
             start = parse_iso(e.get("startTimestamp"))
@@ -135,7 +145,7 @@ async def fetch_events() -> list[dict]:
 # ---------------------------------------------------------------------
 # Build ICS
 # ---------------------------------------------------------------------
-def build_ics(events: list[dict]) -> str:
+def build_ics(events):
     """Build a complete .ics string from Spond events."""
     now = datetime.now(timezone.utc)
 
@@ -164,9 +174,7 @@ def build_ics(events: list[dict]) -> str:
         else:
             location = ""
 
-        start = e.get("_parsed_start")
-        if not isinstance(start, datetime):
-            start = parse_iso(e.get("startTimestamp"))
+        start = e.get("_parsed_start") or parse_iso(e.get("startTimestamp"))
         if not start:
             continue
 
@@ -176,17 +184,17 @@ def build_ics(events: list[dict]) -> str:
         # Last modified: use Spond mod timestamp if present
         last_mod = parse_iso(e.get("lastUpdatedTimestamp") or e.get("updatedAt")) or now
 
-        uid = f"spond-{event_id}@seacroftwheelers.co.uk"
+        uid = "spond-{}@seacroftwheelers.co.uk".format(event_id)
 
         # Event-specific Spond link
-        spond_link = f"https://spond.com/client/sponds/{event_id}"
+        spond_link = "https://spond.com/client/sponds/{}".format(event_id)
 
         base_description = (
             "For more detail on this ride visit:\n"
             "https://www.seacroftwheelers.co.uk/rides/\n\n"
             "To join a ride please use Spond to sign-up:\n"
             "https://club.spond.com/landing/signup/seacroftwheelers/form/2F862229C4DF48B585EF5220E2F914DA\n\n"
-            f"If you are registered, please open this event on Spond:\n{spond_link}"
+            "If you are registered, please open this event on Spond:\n{}".format(spond_link)
         )
 
         description_parts = []
@@ -197,10 +205,10 @@ def build_ics(events: list[dict]) -> str:
 
         vevent = [
             "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTAMP:{format_dt_utc(now)}",
-            f"DTSTART:{format_dt_utc(start)}",
-            f"DTEND:{format_dt_utc(end)}",
+            "UID:{}".format(uid),
+            "DTSTAMP:{}".format(format_dt_utc(now)),
+            "DTSTART:{}".format(format_dt_utc(start)),
+            "DTEND:{}".format(format_dt_utc(end)),
             fold_ical_line("SUMMARY:" + ical_escape(title)),
         ]
 
@@ -208,7 +216,7 @@ def build_ics(events: list[dict]) -> str:
             vevent.append(fold_ical_line("LOCATION:" + ical_escape(location)))
 
         vevent.append(fold_ical_line("DESCRIPTION:" + ical_escape(description)))
-        vevent.append(f"LAST-MODIFIED:{format_dt_utc(last_mod)}")
+        vevent.append("LAST-MODIFIED:{}".format(format_dt_utc(last_mod)))
         vevent.append("END:VEVENT")
 
         lines.extend(vevent)
@@ -220,12 +228,15 @@ def build_ics(events: list[dict]) -> str:
 # ---------------------------------------------------------------------
 # FTP upload
 # ---------------------------------------------------------------------
-def upload_via_ftp(local_path: str):
+def upload_via_ftp(local_path):
     """Upload the generated ICS file to your web hosting via FTP."""
-    print(
-        f"[ICS] Uploading {local_path} -> "
-        f"{FTP_HOST}:{FTP_PORT}/{REMOTE_DIR.rstrip('/')}/{ICS_FILENAME}"
-    )
+    print("[ICS] Uploading {} -> {}:{}/{}/{}".format(
+        local_path,
+        FTP_HOST,
+        FTP_PORT,
+        REMOTE_DIR.rstrip("/"),
+        ICS_FILENAME
+    ))
 
     with ftplib.FTP() as ftp:
         ftp.connect(FTP_HOST, FTP_PORT, timeout=30)
@@ -233,7 +244,7 @@ def upload_via_ftp(local_path: str):
         if REMOTE_DIR:
             ftp.cwd(REMOTE_DIR)
         with open(local_path, "rb") as f:
-            ftp.storbinary(f"STOR {ICS_FILENAME}", f)
+            ftp.storbinary("STOR {}".format(ICS_FILENAME), f)
 
     print("[ICS] Upload complete.")
 
@@ -253,15 +264,15 @@ async def main():
     end_window   = now + timedelta(days=FUTURE_DAYS)
 
     print("[ICS] Fetching Spond events …")
-    print(f"[ICS] Window: {start_window.isoformat()}  →  {end_window.isoformat()}")
-    print(f"[ICS] Requesting up to {MAX_EVENTS} events from Spond…")
+    print("[ICS] Window: {}  →  {}".format(start_window.isoformat(), end_window.isoformat()))
+    print("[ICS] Requesting up to {} events from Spond…".format(MAX_EVENTS))
 
     events = await fetch_events()
 
-    print(f"[ICS] Got {len(events)} events in window.")
+    print("[ICS] Got {} events in window.".format(len(events)))
     if events:
-        print(f"[ICS] Earliest: {events[0]['_parsed_start'].isoformat()}")
-        print(f"[ICS] Latest:   {events[-1]['_parsed_start'].isoformat()}")
+        print("[ICS] Earliest: {}".format(events[0]["_parsed_start"].isoformat()))
+        print("[ICS] Latest:   {}".format(events[-1]["_parsed_start"].isoformat()))
 
     ics_text = build_ics(events)
 
